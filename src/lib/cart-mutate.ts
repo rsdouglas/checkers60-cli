@@ -18,6 +18,7 @@ import {
   type Plan,
   type PlanAccount,
   type PlanSnapshot,
+  type WeightRange,
 } from "./confirm.js";
 import { DivergentOutcomeError, EXIT_CONFIRM, UsageError } from "./errors.js";
 import { formatRand } from "./format.js";
@@ -43,6 +44,8 @@ export interface NewLineSpec {
   priceFactor?: number;
   storeId?: string;
   serviceOptionId: string;
+  /** Set for weighted products: becomes the line's `selectedWeightRange`. */
+  weightRange?: WeightRange;
 }
 
 export function resolveServiceOption(mode?: string): string {
@@ -68,8 +71,64 @@ function unsupportedReason(line: Record<string, unknown>): string | null {
   if (line.hasAlcohol === true || line.requiresOver18 === true) return "age-restricted";
   if (line.optionSelections != null && (line.optionSelections as unknown[]).length !== 0)
     return "has option selections";
-  if (line.selectedWeightRange != null) return "weighted / priced by weight";
   return null;
+}
+
+/** The pack-size ranges a weighted catalog product offers (`variableWeightOptions`), else []. */
+export function weightRanges(p: Record<string, unknown>): WeightRange[] {
+  const raw = p.variableWeightOptions;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((r) => r as Record<string, unknown>)
+    .filter((r) => Number.isFinite(r.minimumValue) && Number.isFinite(r.maximumValue))
+    .map((r) => ({
+      minimumValue: r.minimumValue as number,
+      maximumValue: r.maximumValue as number,
+    }));
+}
+
+export function formatWeightRange(r: WeightRange): string {
+  return `${r.minimumValue}-${r.maximumValue}`;
+}
+
+/**
+ * Choose the weight range for a weighted product. `requested` is "min-max" in
+ * grams (e.g. "300-500"); when omitted, the product's only range is used.
+ */
+export function pickWeightRange(
+  name: string,
+  ranges: WeightRange[],
+  requested?: string
+): WeightRange {
+  const list = ranges.map(formatWeightRange).join(", ");
+  if (requested === undefined) {
+    if (ranges.length === 1) return ranges[0];
+    throw new UsageError(`"${name}" is sold by weight. Choose a range with --weight <${list}>.`);
+  }
+  const m = /^\s*(\d+)\s*-\s*(\d+)\s*g?\s*$/i.exec(requested);
+  const hit =
+    m &&
+    ranges.find((r) => r.minimumValue === Number(m[1]) && r.maximumValue === Number(m[2]));
+  if (!hit) {
+    throw new UsageError(`"${name}" has no ${requested} range. Available: ${list}.`);
+  }
+  return hit;
+}
+
+/**
+ * Line price for a weighted pack, in cents: the per-kg price scaled to the
+ * range's maximum weight, rounded down. Matches what the app writes (e.g.
+ * R229.99/kg × 1.1kg → 25298).
+ */
+export function weightedLinePrice(perKg: number, range: WeightRange): number {
+  return Math.floor((perKg * range.maximumValue) / 1000);
+}
+
+/** Whether a line's `selectedWeightRange` is the given range (or both are unweighted). */
+export function sameRange(a: unknown, b: WeightRange | undefined): boolean {
+  if (b === undefined) return a == null;
+  const r = a as WeightRange | null | undefined;
+  return r != null && r.minimumValue === b.minimumValue && r.maximumValue === b.maximumValue;
 }
 
 /**
@@ -79,6 +138,8 @@ function unsupportedReason(line: Record<string, unknown>): string | null {
  */
 export function productShapeReason(p: Record<string, unknown>): string | null {
   if (p.hasAlcohol === true || p.requiresOver18 === true) return "age-restricted";
+  // Weighted products with captured pack ranges are supported (see weightRanges).
+  if (weightRanges(p).length > 0) return configurableReason(p);
   const weighted =
     p.sellByWeight === true ||
     p.isVariableWeight === true ||
@@ -88,6 +149,10 @@ export function productShapeReason(p: Record<string, unknown>): string | null {
     p.selectedWeightRange != null ||
     (Array.isArray(p.weightRanges) && (p.weightRanges as unknown[]).length > 0);
   if (weighted) return "weighted / priced by weight";
+  return configurableReason(p);
+}
+
+function configurableReason(p: Record<string, unknown>): string | null {
   const configurable =
     p.isConfigurable === true ||
     p.hasProductOptions === true ||
@@ -163,8 +228,10 @@ function applyMutation(snapshot: PlanSnapshot, intent: MutationIntent): PlanSnap
   }
 
   if (intent.operation === "cart.add") {
-    if (matches.length > 0) {
-      matches[0].quantity = (Number(matches[0].quantity) || 0) + (intent.quantity ?? 1);
+    // A weighted product can sit on several lines with different ranges; only merge into the same one.
+    const same = matches.filter((m) => sameRange(m.selectedWeightRange, intent.weightRange));
+    if (same.length > 0) {
+      same[0].quantity = (Number(same[0].quantity) || 0) + (intent.quantity ?? 1);
     } else {
       if (!intent.newLine) {
         throw new PlanStaleError("Missing line specification. Run the preview again.");
@@ -381,11 +448,29 @@ function reconcile(
   return "divergent";
 }
 
-/** Sanitized description of a dispatch error — never interpolates APIError.message (may carry a body). */
-function safeErr(err: unknown): string {
-  if (err instanceof APIError) return `HTTP ${err.status} ${err.statusText}`;
+/**
+ * Sanitized description of a dispatch error — never interpolates APIError.message
+ * or the raw body. Only the server's JSON `message` field is surfaced (e.g.
+ * "Missing weight range"), single-line and truncated.
+ */
+export function safeErr(err: unknown): string {
+  if (err instanceof APIError) {
+    const base = `HTTP ${err.status} ${err.statusText}`;
+    const msg = serverMessage(err.body);
+    return msg ? `${base}: ${msg}` : base;
+  }
   if (err instanceof Error) return err.name || "error";
   return "error";
+}
+
+function serverMessage(body: string): string | undefined {
+  try {
+    const m = (JSON.parse(body) as { message?: unknown } | null)?.message;
+    if (typeof m !== "string" || !m.trim()) return undefined;
+    return m.replace(/\s+/g, " ").trim().slice(0, 160);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -562,6 +647,8 @@ export function buildNewLine(spec: NewLineSpec, quantity: number): Record<string
     requiresOver18: false,
     isSponsoredProduct: false,
     hasAlcohol: false,
+    optionSelections: null,
+    selectedWeightRange: spec.weightRange ? { ...spec.weightRange } : null,
     product: null,
   };
 }

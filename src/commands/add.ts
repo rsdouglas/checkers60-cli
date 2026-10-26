@@ -1,7 +1,12 @@
 import { CheckersAPI } from "../lib/api.js";
 import {
   buildNewLine,
+  formatWeightRange,
+  pickWeightRange,
   productShapeReason,
+  sameRange,
+  weightedLinePrice,
+  weightRanges,
   runCartMutation,
   type MutateOptions,
 } from "../lib/cart-mutate.js";
@@ -9,7 +14,10 @@ import { UsageError } from "../lib/errors.js";
 import { isProductId } from "../lib/format.js";
 import { startSpinner } from "../lib/output.js";
 
-export type AddOptions = MutateOptions;
+export interface AddOptions extends MutateOptions {
+  /** Weighted products: pack range in grams, e.g. "300-500". Defaults to the only range. */
+  weight?: string;
+}
 
 interface Pick {
   id: string;
@@ -36,26 +44,41 @@ export async function add(target: string, qty = 1, options: AddOptions = {}): Pr
     throw new UsageError(`"${pick.name}" is ${reason}; adding it via the CLI is not supported yet.`);
   }
 
+  const ranges = weightRanges(pick.raw);
+  if (ranges.length === 0 && options.weight !== undefined) {
+    throw new UsageError(`"${pick.name}" is not sold by weight; drop --weight.`);
+  }
+  const weightRange =
+    ranges.length > 0 ? pickWeightRange(pick.name, ranges, options.weight) : undefined;
+  const price = weightRange ? weightedLinePrice(pick.price, weightRange) : pick.price;
+  const displayName = weightRange
+    ? `${pick.name} [${formatWeightRange(weightRange)}g]`
+    : pick.name;
+
   await runCartMutation(api, "cart.add", options, async (targetCart, serviceOptionId) => {
-    const present = targetCart.lineItems.some((li) => li.productId === pick.id);
+    const present = targetCart.lineItems.some(
+      (li) => li.productId === pick.id && sameRange(li.selectedWeightRange, weightRange)
+    );
     return {
-      displayName: pick.name,
+      displayName,
       intent: {
         operation: "cart.add",
         targetCartId: targetCart.cartId,
         targetServiceOptionId: serviceOptionId,
         productId: pick.id,
         quantity: qty,
+        weightRange,
         newLine: present
           ? undefined
           : buildNewLine(
               {
                 productId: pick.id,
                 name: pick.name,
-                price: pick.price,
+                price,
                 priceFactor: pick.priceFactor,
                 storeId: pick.storeId,
                 serviceOptionId,
+                weightRange,
               },
               qty
             ),
@@ -85,6 +108,8 @@ async function resolvePick(api: CheckersAPI, target: string): Promise<Pick> {
   const { products } = await api.searchProducts(target, { pageSize: 5 });
   const p = products[0];
   if (!p) throw new UsageError(`No results for "${target}".`);
+  // Search results are mapped and drop the weight-range fields; re-resolve by id.
+  if (isProductId(p.id)) return resolvePick(api, p.id);
   if (p.price === undefined) {
     throw new UsageError(`"${p.name}" has no price and cannot be added.`);
   }
