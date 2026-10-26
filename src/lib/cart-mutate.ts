@@ -333,8 +333,8 @@ function assertNoDupModes(snapshot: PlanSnapshot): void {
  * ids and may legitimately re-price; comparing them would report false divergence.
  * Address is compared separately. Assumes no duplicate modes (checked upstream).
  */
-function modeSets(s: PlanSnapshot): Record<string, string> {
-  const out: Record<string, string> = {};
+function modeSets(s: PlanSnapshot): Record<string, { addr: string; items: string }> {
+  const out: Record<string, { addr: string; items: string }> = {};
   for (const c of s.carts) {
     const totals: Record<string, number> = {};
     for (const li of c.lineItems) {
@@ -346,9 +346,19 @@ function modeSets(s: PlanSnapshot): Record<string, string> {
       .sort((a, b) => a[0].localeCompare(b[0]));
     // Include the cart's own delivery address: a per-cart address change is a
     // collateral mutation that must not read as success.
-    out[c.serviceOptionId] = JSON.stringify({ addr: c.deliveryAddressId, items: entries });
+    out[c.serviceOptionId] = { addr: c.deliveryAddressId, items: JSON.stringify(entries) };
   }
   return out;
+}
+
+/**
+ * Per-cart address equality. A fresh cart (after checkout, or the one DELETE
+ * rotates in) has no address until its first write, when the server stamps the
+ * account address on it. Unset → set (or set → unset on rotation) is therefore
+ * not a collateral change; only one real address replacing another is.
+ */
+function sameCartAddress(a: string, b: string): boolean {
+  return a === b || a === "" || b === "";
 }
 
 /** Whole-snapshot equality: EVERY cart's item set plus the delivery address. */
@@ -358,7 +368,9 @@ function snapshotEquivalent(a: PlanSnapshot, b: PlanSnapshot): boolean {
   const mb = modeSets(b);
   const keys = new Set([...Object.keys(ma), ...Object.keys(mb)]);
   for (const k of keys) {
-    if (ma[k] !== mb[k]) return false;
+    const x = ma[k];
+    const y = mb[k];
+    if (!x || !y || x.items !== y.items || !sameCartAddress(x.addr, y.addr)) return false;
   }
   return true;
 }

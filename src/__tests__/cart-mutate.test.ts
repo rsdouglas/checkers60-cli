@@ -458,6 +458,37 @@ describe("cart mutation gate — reconcile", () => {
     ).rejects.toBeInstanceOf(DivergentOutcomeError);
   });
 
+  it("succeeds when the write stamps an address on a fresh, unaddressed cart", async () => {
+    // After checkout the server rotates in an empty cart with no address; the
+    // first write fills it in. That is not a collateral change.
+    const start = snapshot([]);
+    start.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+    const f = fakeApi(start, {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId =
+          "addr-1";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1));
+    expect(lastJson().ok).toBe(true);
+  });
+
+  it("succeeds when the rotated cart comes back without an address", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]), {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1));
+    expect(lastJson().ok).toBe(true);
+  });
+
   it("a falsey dispatch rejection is still treated as a failure (unchanged → exit 5, 'write failed')", async () => {
     const f = fakeApi(snapshot([line({ quantity: 1 })]), { throwOnCommit: undefined });
     const planId = await preview(f, addProd(1));
