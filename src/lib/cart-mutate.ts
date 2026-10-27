@@ -352,25 +352,41 @@ function modeSets(s: PlanSnapshot): Record<string, { addr: string; items: string
 }
 
 /**
- * Per-cart address equality. A fresh cart (after checkout, or the one DELETE
- * rotates in) has no address until its first write, when the server stamps the
- * account address on it. Unset → set (or set → unset on rotation) is therefore
- * not a collateral change; only one real address replacing another is.
+ * Per-cart address equality, `fresh` (post-write) against `expected`. A fresh
+ * cart (after checkout, or the one DELETE rotates in) has no address until its
+ * first write, when the server stamps the account address on it. So:
+ * - unset → the account address is the server stamping it, on any cart;
+ * - set → unset is accepted only on the target cart (DELETE rotation);
+ * anything else, including one real address replacing another, is collateral.
  */
-function sameCartAddress(a: string, b: string): boolean {
-  return a === b || a === "" || b === "";
+function sameCartAddress(
+  fresh: string,
+  expected: string,
+  accountAddress: string,
+  isTarget: boolean
+): boolean {
+  if (fresh === expected) return true;
+  if (expected === "") return fresh === accountAddress;
+  if (fresh === "") return isTarget;
+  return false;
 }
 
 /** Whole-snapshot equality: EVERY cart's item set plus the delivery address. */
-function snapshotEquivalent(a: PlanSnapshot, b: PlanSnapshot): boolean {
-  if (a.deliveryAddressId !== b.deliveryAddressId) return false;
-  const ma = modeSets(a);
-  const mb = modeSets(b);
-  const keys = new Set([...Object.keys(ma), ...Object.keys(mb)]);
+function snapshotEquivalent(
+  fresh: PlanSnapshot,
+  expected: PlanSnapshot,
+  targetServiceOptionId: string
+): boolean {
+  if (fresh.deliveryAddressId !== expected.deliveryAddressId) return false;
+  const mf = modeSets(fresh);
+  const me = modeSets(expected);
+  const keys = new Set([...Object.keys(mf), ...Object.keys(me)]);
   for (const k of keys) {
-    const x = ma[k];
-    const y = mb[k];
-    if (!x || !y || x.items !== y.items || !sameCartAddress(x.addr, y.addr)) return false;
+    const x = mf[k];
+    const y = me[k];
+    if (!x || !y || x.items !== y.items) return false;
+    if (!sameCartAddress(x.addr, y.addr, fresh.deliveryAddressId, k === targetServiceOptionId))
+      return false;
   }
   return true;
 }
@@ -384,12 +400,13 @@ function snapshotEquivalent(a: PlanSnapshot, b: PlanSnapshot): boolean {
 function reconcile(
   fresh: PlanSnapshot,
   intended: PlanSnapshot,
-  original: PlanSnapshot
+  original: PlanSnapshot,
+  targetServiceOptionId: string
 ): "success" | "unchanged" | "divergent" {
   // Ambiguity anywhere (esp. a post-dispatch duplicate mode) can't be a clean match.
   if (hasDupModes(fresh) || hasDupModes(intended) || hasDupModes(original)) return "divergent";
-  if (snapshotEquivalent(fresh, intended)) return "success";
-  if (snapshotEquivalent(fresh, original)) return "unchanged";
+  if (snapshotEquivalent(fresh, intended, targetServiceOptionId)) return "success";
+  if (snapshotEquivalent(fresh, original, targetServiceOptionId)) return "unchanged";
   return "divergent";
 }
 
@@ -515,7 +532,7 @@ export async function runCartMutation(
       );
     }
 
-    const outcome = reconcile(after, intended, planSnapshot);
+    const outcome = reconcile(after, intended, planSnapshot, planMutation.targetServiceOptionId);
 
     if (outcome === "divergent") {
       throw new DivergentOutcomeError(

@@ -489,6 +489,37 @@ describe("cart mutation gate — reconcile", () => {
     expect(lastJson().ok).toBe(true);
   });
 
+  it("is divergent when a non-target cart's address is cleared collaterally", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]), {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "one-day-delivery")!.deliveryAddressId = "";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  it("is divergent when an unaddressed cart is stamped with a non-account address", async () => {
+    const start = snapshot([]);
+    start.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId = "";
+    const f = fakeApi(start, {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        s.carts.find((c) => c.serviceOptionId === "sixty-min-delivery")!.deliveryAddressId =
+          "addr-OTHER";
+        return s;
+      },
+    });
+    const planId = await preview(f, addProd(1));
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
   it("a falsey dispatch rejection is still treated as a failure (unchanged → exit 5, 'write failed')", async () => {
     const f = fakeApi(snapshot([line({ quantity: 1 })]), { throwOnCommit: undefined });
     const planId = await preview(f, addProd(1));
