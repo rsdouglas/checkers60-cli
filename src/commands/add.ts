@@ -85,7 +85,8 @@ export async function add(target: string, qty = 1, options: AddOptions = {}): Pr
 async function resolvePick(api: CheckersAPI, target: string): Promise<Pick> {
   if (isProductId(target)) {
     const details = await api.getProductDetails([target]);
-    const d = details[0];
+    // The filter can return other display variants; never fall back to one of them.
+    const d = details.find((x) => x.id === target);
     if (!d) throw new UsageError(`Product ${target} not found.`);
     if (d.priceWithoutDecimal === undefined) {
       throw new UsageError(`Product ${target} has no price and cannot be added.`);

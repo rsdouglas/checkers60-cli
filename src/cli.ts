@@ -471,6 +471,7 @@ program
   .option("--json", "Output JSON", false)
   .option("--mode <mode>", "Target cart: sixty-min (default) or one-day")
   .option("--confirm <planId>", "Apply a previously previewed plan")
+  .option("--weight <range>", "Weighted products in several ranges: which range, e.g. 300-500")
   .addHelpText(
     "after",
     `
@@ -487,13 +488,14 @@ Examples:
       async (
         target: string,
         qty: string | undefined,
-        opts: { json?: boolean; mode?: string; confirm?: string }
+        opts: { json?: boolean; mode?: string; confirm?: string; weight?: string }
       ) => {
         const { remove } = await import("./commands/remove.js");
         await remove(target, qty === undefined ? undefined : parseCount(qty, "quantity"), {
           json: mergeJson(opts),
           mode: opts.mode,
           confirm: opts.confirm,
+          weight: opts.weight,
         });
       }
     )

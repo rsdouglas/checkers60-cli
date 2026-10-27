@@ -229,6 +229,19 @@ const removeProd =
     },
   });
 
+const removeWeighted =
+  (range: { minimumValue: number; maximumValue: number } | undefined, qty?: number): BuildFn =>
+  async (targetCart, so) => ({
+    intent: {
+      operation: "cart.remove",
+      targetCartId: targetCart.cartId,
+      targetServiceOptionId: so,
+      productId: "PROD",
+      quantity: qty,
+      weightRange: range,
+    },
+  });
+
 let outSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -821,6 +834,56 @@ describe("weighted products", () => {
     await expect(
       runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, build)
     ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
+  const twoRangeCart = () =>
+    snapshot([
+      line({ id: "li-a", selectedWeightRange: ranges[0], quantity: 2 }),
+      line({ id: "li-b", selectedWeightRange: ranges[1], quantity: 1 }),
+    ]);
+
+  it("removes only the chosen weight range's line", async () => {
+    const f = fakeApi(twoRangeCart());
+    const build = removeWeighted(ranges[0]);
+    const planId = await preview(f, build, "cart.remove");
+    await runCartMutation(f.api, "cart.remove", { json: true, confirm: planId }, build);
+    const sent = f.commit.mock.calls[0][0] as PlanSnapshot;
+    const live = sent.carts
+      .find((c) => c.cartId === "cart-60")!
+      .lineItems.filter((li) => Number(li.quantity) > 0);
+    expect(live.map((li) => li.id)).toEqual(["li-b"]);
+  });
+
+  it("decrements only within the chosen range", async () => {
+    const f = fakeApi(twoRangeCart());
+    const build = removeWeighted(ranges[1], 1);
+    const planId = await preview(f, build, "cart.remove");
+    await runCartMutation(f.api, "cart.remove", { json: true, confirm: planId }, build);
+    const sent = f.commit.mock.calls[0][0] as PlanSnapshot;
+    const a = sent.carts.find((c) => c.cartId === "cart-60")!.lineItems.find((li) => li.id === "li-a")!;
+    expect(a.quantity).toBe(2);
+  });
+
+  it("refuses a remove without a range when the product is in several ranges", async () => {
+    const f = fakeApi(twoRangeCart());
+    await expect(
+      runCartMutation(f.api, "cart.remove", { json: true }, removeWeighted(undefined))
+    ).rejects.toThrow(/several weight ranges/);
+  });
+
+  it("refuses to confirm when a line's range changed since the preview", async () => {
+    // Preview plans a NEW 500-700 line; meanwhile the existing line becomes 500-700.
+    // Without the range in the fingerprint, confirm would merge into it instead.
+    const f = fakeApi(snapshot([line({ selectedWeightRange: ranges[0] })]));
+    const build = weightedAdd(ranges[1]);
+    const planId = await preview(f, build, "cart.add");
+    f.mutate((s) => {
+      s.carts.find((c) => c.cartId === "cart-60")!.lineItems[0].selectedWeightRange = ranges[1];
+    });
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, build)
+    ).rejects.toBeInstanceOf(PlanStaleError);
+    expect(f.commit).not.toHaveBeenCalled();
   });
 
   it("reads ranges from variableWeightOptions", () => {

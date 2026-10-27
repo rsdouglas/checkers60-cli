@@ -143,6 +143,16 @@ export function weightedLinePrice(perKg: number, range: WeightRange): number {
   return Math.floor((perKg * range.maximumValue) / 1000);
 }
 
+/** The distinct weight ranges across lines (an unweighted line counts as its own "range"). */
+export function distinctRanges(lines: Record<string, unknown>[]): (WeightRange | null)[] {
+  const out: (WeightRange | null)[] = [];
+  for (const li of lines) {
+    const r = (li.selectedWeightRange as WeightRange | null | undefined) ?? null;
+    if (!out.some((o) => (o === null ? r === null : sameRange(r, o)))) out.push(r);
+  }
+  return out;
+}
+
 /** Whether a line's `selectedWeightRange` is the given range (or both are unweighted). */
 export function sameRange(a: unknown, b: WeightRange | undefined): boolean {
   if (b === undefined) return a == null;
@@ -196,6 +206,10 @@ function fingerprint(snapshot: PlanSnapshot): string {
           productId: li.productId,
           quantity: li.quantity,
           price: li.price,
+          // Range is part of a weighted line's identity: drift since the preview must refuse.
+          range: li.selectedWeightRange
+            ? formatWeightRange(li.selectedWeightRange as WeightRange)
+            : null,
         }))
         .sort((a, b) => String(a.id).localeCompare(String(b.id))),
     }))
@@ -260,18 +274,27 @@ function applyMutation(snapshot: PlanSnapshot, intent: MutationIntent): PlanSnap
     return next;
   }
 
-  // cart.remove
-  if (matches.length === 0) {
+  // cart.remove — scoped to one weight range when the product is weighted.
+  const inScope = (li: Record<string, unknown>): boolean =>
+    li.productId === intent.productId &&
+    (intent.weightRange === undefined || sameRange(li.selectedWeightRange, intent.weightRange));
+  if (intent.weightRange === undefined && distinctRanges(matches).length > 1) {
+    throw new UsageError(
+      `"${intent.productId}" is in the cart in several weight ranges; choose one with --weight.`
+    );
+  }
+  const scoped = matches.filter(inScope);
+  if (scoped.length === 0) {
     throw new UsageError(`"${intent.productId}" is not in the ${cart.serviceOptionId} cart.`);
   }
-  const total = matches.reduce((n, m) => n + (Number(m.quantity) || 0), 0);
+  const total = scoped.reduce((n, m) => n + (Number(m.quantity) || 0), 0);
   if (intent.quantity === undefined || intent.quantity >= total) {
-    // Remove ALL lines for this product.
-    cart.lineItems = cart.lineItems.filter((li) => li.productId !== intent.productId);
+    // Remove ALL in-scope lines for this product.
+    cart.lineItems = cart.lineItems.filter((li) => !inScope(li));
   } else {
-    // Consume the requested quantity across matching lines, then drop emptied ones.
+    // Consume the requested quantity across in-scope lines, then drop emptied ones.
     let toRemove = intent.quantity;
-    for (const m of matches) {
+    for (const m of scoped) {
       if (toRemove <= 0) break;
       const q = Number(m.quantity) || 0;
       const take = Math.min(q, toRemove);
@@ -279,7 +302,7 @@ function applyMutation(snapshot: PlanSnapshot, intent: MutationIntent): PlanSnap
       toRemove -= take;
     }
     cart.lineItems = cart.lineItems.filter(
-      (li) => !(li.productId === intent.productId && (Number(li.quantity) || 0) === 0)
+      (li) => !(inScope(li) && (Number(li.quantity) || 0) === 0)
     );
   }
   return next;
