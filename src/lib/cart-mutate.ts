@@ -95,6 +95,25 @@ export function formatWeightRange(r: WeightRange): string {
  * Choose the weight range for a weighted product. `requested` is "min-max" in
  * grams (e.g. "300-500"); when omitted, the product's only range is used.
  */
+/**
+ * The weight range `add` should use. On `--confirm` the plan already holds the
+ * range, so nothing is resolved (and a multi-range product needs no --weight).
+ */
+export function resolveAddWeight(
+  name: string,
+  ranges: WeightRange[],
+  options: { weight?: string; confirm?: string }
+): WeightRange | undefined {
+  if (options.confirm) return undefined;
+  if (ranges.length === 0) {
+    if (options.weight !== undefined) {
+      throw new UsageError(`"${name}" is not sold by weight; drop --weight.`);
+    }
+    return undefined;
+  }
+  return pickWeightRange(name, ranges, options.weight);
+}
+
 export function pickWeightRange(
   name: string,
   ranges: WeightRange[],
@@ -405,8 +424,11 @@ function modeSets(s: PlanSnapshot): Record<string, string> {
   for (const c of s.carts) {
     const totals: Record<string, number> = {};
     for (const li of c.lineItems) {
-      const pid = String(li.productId);
-      totals[pid] = (totals[pid] ?? 0) + (Number(li.quantity) || 0);
+      // Weighted lines are keyed by range too, so a server swap or collapse of
+      // ranges can't match the intended per-product total.
+      const r = li.selectedWeightRange as WeightRange | null | undefined;
+      const key = r ? `${li.productId}@${formatWeightRange(r)}` : String(li.productId);
+      totals[key] = (totals[key] ?? 0) + (Number(li.quantity) || 0);
     }
     const entries = Object.entries(totals)
       .filter(([, q]) => q !== 0)
@@ -467,7 +489,12 @@ function serverMessage(body: string): string | undefined {
   try {
     const m = (JSON.parse(body) as { message?: unknown } | null)?.message;
     if (typeof m !== "string" || !m.trim()) return undefined;
-    return m.replace(/\s+/g, " ").trim().slice(0, 160);
+    // Strip control characters (ESC/BEL/C1) so a server string can't drive the terminal.
+    return m
+      .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 160);
   } catch {
     return undefined;
   }

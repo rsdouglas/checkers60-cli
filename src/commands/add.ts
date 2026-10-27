@@ -2,7 +2,7 @@ import { CheckersAPI } from "../lib/api.js";
 import {
   buildNewLine,
   formatWeightRange,
-  pickWeightRange,
+  resolveAddWeight,
   productShapeReason,
   sameRange,
   weightedLinePrice,
@@ -44,12 +44,7 @@ export async function add(target: string, qty = 1, options: AddOptions = {}): Pr
     throw new UsageError(`"${pick.name}" is ${reason}; adding it via the CLI is not supported yet.`);
   }
 
-  const ranges = weightRanges(pick.raw);
-  if (ranges.length === 0 && options.weight !== undefined) {
-    throw new UsageError(`"${pick.name}" is not sold by weight; drop --weight.`);
-  }
-  const weightRange =
-    ranges.length > 0 ? pickWeightRange(pick.name, ranges, options.weight) : undefined;
+  const weightRange = resolveAddWeight(pick.name, weightRanges(pick.raw), options);
   const price = weightRange ? weightedLinePrice(pick.price, weightRange) : pick.price;
   const displayName = weightRange
     ? `${pick.name} [${formatWeightRange(weightRange)}g]`

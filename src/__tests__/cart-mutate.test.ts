@@ -8,6 +8,7 @@ import {
   buildWriteSnapshot,
   pickWeightRange,
   productShapeReason,
+  resolveAddWeight,
   runCartMutation,
   safeErr,
   sameRange,
@@ -798,6 +799,30 @@ describe("weighted products", () => {
     { minimumValue: 500, maximumValue: 700 },
   ];
 
+  it("resolves no range on --confirm, so a multi-range confirm needs no --weight", () => {
+    expect(resolveAddWeight("Mince", ranges, { confirm: "sha256:x" })).toBeUndefined();
+    expect(() => resolveAddWeight("Mince", ranges, {})).toThrow(/--weight/);
+    expect(() => resolveAddWeight("Milk", [], { weight: "300-500" })).toThrow(/not sold by weight/);
+  });
+
+  it("is divergent when the server swaps a weighted line's range", async () => {
+    const r1 = { minimumValue: 300, maximumValue: 500 };
+    const r2 = { minimumValue: 500, maximumValue: 700 };
+    const f = fakeApi(snapshot([line({ selectedWeightRange: r1 })]), {
+      onCommit: (sent) => {
+        const s = structuredClone(sent);
+        const lines = s.carts.find((c) => c.cartId === "cart-60")!.lineItems;
+        for (const li of lines) li.selectedWeightRange = r2; // collapse both lines onto r2
+        return s;
+      },
+    });
+    const build = weightedAdd(r2);
+    const planId = await preview(f, build, "cart.add");
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, build)
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
+  });
+
   it("reads ranges from variableWeightOptions", () => {
     expect(weightRanges({ variableWeightOptions: [ranges[0]] })).toEqual([ranges[0]]);
     expect(weightRanges({})).toEqual([]);
@@ -843,6 +868,11 @@ describe("safeErr", () => {
     expect(safeErr(new APIError(400, "Bad Request", body, "/x"))).toBe(
       "HTTP 400 Bad Request: Missing weight range"
     );
+  });
+
+  it("strips terminal control characters from the server message", () => {
+    const body = JSON.stringify({ message: "out\u001b[2Jof\u0007 stock\u009b" });
+    expect(safeErr(new APIError(498, "Unknown", body, "/x"))).toBe("HTTP 498 Unknown: out [2Jof stock");
   });
 
   it("falls back to the status when the body has no message", () => {
