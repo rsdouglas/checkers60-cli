@@ -356,18 +356,19 @@ function modeSets(s: PlanSnapshot): Record<string, { addr: string; items: string
  * cart (after checkout, or the one DELETE rotates in) has no address until its
  * first write, when the server stamps the account address on it. So:
  * - unset → the account address is the server stamping it, on any cart;
- * - set → unset is accepted only on the target cart (DELETE rotation);
+ * - set → unset is accepted only on the target cart, and only when the write
+ *   was a DELETE that rotated it to a new cart id;
  * anything else, including one real address replacing another, is collateral.
  */
 function sameCartAddress(
   fresh: string,
   expected: string,
   accountAddress: string,
-  isTarget: boolean
+  isRotatedTarget: boolean
 ): boolean {
   if (fresh === expected) return true;
   if (expected === "") return fresh === accountAddress;
-  if (fresh === "") return isTarget;
+  if (fresh === "") return isRotatedTarget;
   return false;
 }
 
@@ -375,7 +376,7 @@ function sameCartAddress(
 function snapshotEquivalent(
   fresh: PlanSnapshot,
   expected: PlanSnapshot,
-  targetServiceOptionId: string
+  rotatedServiceOptionId: string | undefined
 ): boolean {
   if (fresh.deliveryAddressId !== expected.deliveryAddressId) return false;
   const mf = modeSets(fresh);
@@ -385,7 +386,7 @@ function snapshotEquivalent(
     const x = mf[k];
     const y = me[k];
     if (!x || !y || x.items !== y.items) return false;
-    if (!sameCartAddress(x.addr, y.addr, fresh.deliveryAddressId, k === targetServiceOptionId))
+    if (!sameCartAddress(x.addr, y.addr, fresh.deliveryAddressId, k === rotatedServiceOptionId))
       return false;
   }
   return true;
@@ -401,12 +402,12 @@ function reconcile(
   fresh: PlanSnapshot,
   intended: PlanSnapshot,
   original: PlanSnapshot,
-  targetServiceOptionId: string
+  rotatedServiceOptionId?: string
 ): "success" | "unchanged" | "divergent" {
   // Ambiguity anywhere (esp. a post-dispatch duplicate mode) can't be a clean match.
   if (hasDupModes(fresh) || hasDupModes(intended) || hasDupModes(original)) return "divergent";
-  if (snapshotEquivalent(fresh, intended, targetServiceOptionId)) return "success";
-  if (snapshotEquivalent(fresh, original, targetServiceOptionId)) return "unchanged";
+  if (snapshotEquivalent(fresh, intended, rotatedServiceOptionId)) return "success";
+  if (snapshotEquivalent(fresh, original, rotatedServiceOptionId)) return "unchanged";
   return "divergent";
 }
 
@@ -532,7 +533,17 @@ export async function runCartMutation(
       );
     }
 
-    const outcome = reconcile(after, intended, planSnapshot, planMutation.targetServiceOptionId);
+    // Only a DELETE that actually rotated the target cart may come back unaddressed.
+    const rotated =
+      willEmpty &&
+      !!findCartByMode(after, planMutation.targetServiceOptionId) &&
+      findCartByMode(after, planMutation.targetServiceOptionId)!.cartId !== planMutation.targetCartId;
+    const outcome = reconcile(
+      after,
+      intended,
+      planSnapshot,
+      rotated ? planMutation.targetServiceOptionId : undefined
+    );
 
     if (outcome === "divergent") {
       throw new DivergentOutcomeError(

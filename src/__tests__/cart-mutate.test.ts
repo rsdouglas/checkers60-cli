@@ -146,6 +146,7 @@ function fakeApi(
         c.cartId = `${cartId}-new`;
         c.cartVersion = 0;
         c.lineItems = [];
+        c.deliveryAddressId = ""; // the real server's rotated cart is unaddressed
       }
     }
   });
@@ -170,6 +171,10 @@ type BuildFn = (
   targetCart: { cartId: string; lineItems: Record<string, unknown>[] },
   serviceOptionId: string
 ) => Promise<{ intent: MutationIntent; displayName?: string } | { noop: true; reason?: string }>;
+
+const clearAll: BuildFn = async (tc, so) => ({
+  intent: { operation: "cart.clear", targetCartId: tc.cartId, targetServiceOptionId: so },
+});
 
 const addProd =
   (qty = 1): BuildFn =>
@@ -476,7 +481,15 @@ describe("cart mutation gate — reconcile", () => {
     expect(lastJson().ok).toBe(true);
   });
 
-  it("succeeds when the rotated cart comes back without an address", async () => {
+  it("succeeds when a clear's DELETE rotates in an unaddressed cart", async () => {
+    const f = fakeApi(snapshot([line({ quantity: 1 })]));
+    const planId = await preview(f, clearAll, "cart.clear");
+    await runCartMutation(f.api, "cart.clear", { json: true, confirm: planId }, clearAll);
+    expect(f.del).toHaveBeenCalledOnce();
+    expect(lastJson().ok).toBe(true);
+  });
+
+  it("is divergent when an update (not a DELETE) clears the target cart's address", async () => {
     const f = fakeApi(snapshot([line({ quantity: 1 })]), {
       onCommit: (sent) => {
         const s = structuredClone(sent);
@@ -485,8 +498,9 @@ describe("cart mutation gate — reconcile", () => {
       },
     });
     const planId = await preview(f, addProd(1));
-    await runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1));
-    expect(lastJson().ok).toBe(true);
+    await expect(
+      runCartMutation(f.api, "cart.add", { json: true, confirm: planId }, addProd(1))
+    ).rejects.toBeInstanceOf(DivergentOutcomeError);
   });
 
   it("is divergent when a non-target cart's address is cleared collaterally", async () => {
